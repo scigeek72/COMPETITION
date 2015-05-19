@@ -1,0 +1,1197 @@
+Kaggle Competiton (Analytic's Edge) [04-26-2014]
+========================================================
+
+## Following Libraries may be needed
+```{r All Libraries}
+library(mice) ## Imputation
+library(caTools) ## Data Splitting
+library(bnlearn) ## Bayesian net (for MARKOV BLANKET)
+library(glmnet)  ## Cross-Validation regression
+library(flexclust) ## Clustering
+library(kknn)    ## K-nearest Neigbbor
+library(kernlab) ## SVM
+library(e1071)   ## SVM and other tools
+library(ROCR)    ## AUC value etc
+library(gbm)     ## GBM
+library(ada)     ## adaboost
+library(MASS)    ## LDA, QDA
+library(class)   ## 
+library(rpart)   ## CART (Tree based algorithms)
+library(randomForest)  ## Random Forest
+library(caret)
+
+```
+
+
+
+## Load the Imputed data (saved in files) [Doesn't have UserID and YOB]
+
+```{r Imputed DATA}
+ImpTrainData = read.csv("ImputedTrainData.csv")
+ImpTestData = read.csv("ImputedTestData.csv")
+```
+
+## Split the data set into Training and Testing Data for Out-of-Sample error
+
+```{r Split Train Data}
+set.seed(144)
+
+spl = sample.split(ImpTrainData$Happy, SplitRatio = 0.7)
+
+subTrainData = subset(ImpTrainData, spl == TRUE)
+subTestData = subset(ImpTrainData, spl == FALSE)
+
+```
+
+##----------------------------------------------------------##
+FUNCTIONS
+---------
+
+The following function is used to calculate AUC value
+
+```{r function:AUCval}
+AUCval = function(pred, truth){
+  predob = prediction(pred, truth)
+  as.numeric(performance(predob, "auc")@y.values)
+}
+```
+
+The following function is used to plot the ROC curve
+
+```{r function:ROCplot}
+## ... is used to pass extra parameters to the plot function of the ROC curve
+ROCplot = function(pred, truth, ...){
+  predob = prediction(pred, truth)
+  perf = performance(predob, "tpr","fpr")
+  plot(perf, ...)
+}
+
+```
+
+The following function is used to calculate Accuracy
+
+```{r function:Accuracy}
+Accuracy = function(truth, predClass){
+  a = table(truth, predClass)
+  sum(diag(a))/sum(a)
+}
+
+```
+
+
+
+##------------------------------------------------------------------##
+
+LOGISTIC MODEL
+--------------
+
+## Use the step function to search for a Best glm model
+## First use glm on the dataset as is to generate a fit.
+
+```{r LOGIT}
+x = subTrainData
+test.x = subTestData
+
+AllVar.Logit.1 = glm(Happy~., data = x, family = "binomial")
+
+```
+
+##Step through the variables to choose the best model algorithmically (by AIC)
+```{r STEPfunction}
+searchBestModel = step(AllVar.Logit.1)
+```
+
+## Variables used in the final model (searchBastModel) found by step function
+```{r Vars Used in Setp LOGIT}
+
+searchBestModel$call
+variablesUsed.AllVar.Logit.1
+
+```
+
+
+## Predict on the test.x data
+```{r LOGIT PREDICTION}
+pred.searchBastModel.subTestData = predict(searchBestModel, newdata = test.x, type = "response")
+
+```
+
+## Measure Accuracy
+
+```{r LOGIT ACCURACY}
+confMat.LOGIT.1 = table(subTestData$Happy, pred.searchBastModel.subTestData > 0.5)
+
+sum(diag(confMat.LOGIT.1))/nrow(test.x)
+```
+
+## Calculate AUC{LogitAUC}
+
+```{r LOGIT AUC}
+ROCRpred = prediction(pred.searchBastModel.subTestData, test.x$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+
+
+
+Run LASSO (GLMNET package) Using Cross-Validation
+--------------------------------------------------
+
+To run it, we need a matrix with non-factor columns of predictors (train.x) and  a response vector (y). train.x doesn't contain the response vector. 
+Also, the train.x shouldnot have factors. Convert them to numeric via as.numeric(as.character()) function call
+
+```{r LASSO Data Prep}
+train.x = subTrainData
+train.x$Happy = NULL
+
+for(i in 1:ncol(train.x)){train.x[,i] = as.numeric(train.x[,i])}
+
+y = subTrainData$Happy
+
+test.x = subTestData
+test.x$Happy = NULL
+for(i in 1:ncol(test.x)){test.x[,i] = as.numeric(test.x[,i])}
+
+
+```
+
+##Now run cross-validated glmnet
+
+```{r LASSO RUN}
+AllVar.LASSO.1 = cv.glmnet(as.matrix(train.x), y, family = "binomial", type.measure = "class")
+
+```
+
+## Variables with non-zero coefficients
+
+```{r}
+
+NonZeroVars.LASSO.1 = colnames(subTrainData)[which(coef(AllVar.LASSO.1)!=0)]
+```
+
+## Predict 
+
+```{r LASSO Predict}
+pred.AllVar.LASSO.1.test.x = predict(AllVar.LASSO.1, newx = as.matrix(test.x), s = "lambda.min", type = "response")
+
+```
+
+## Measure Accuracy
+
+```{r LASSO ACCURACY}
+confMat.LASSO.1 = table(subTestData$Happy, pred.AllVar.LASSO.1.test.x > 0.5)
+
+sum(diag(confMat.LASSO.1))/nrow(test.x)
+```
+
+## Calculate AUC{LASSO AUC}
+
+```{r LASSO AUC}
+ROCRpred = prediction(pred.AllVar.LASSO.1.test.x, subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+
+
+RUN NAIVE BASE (BNLEARN package and e1071 package)
+--------------------------------
+
+##First Find the Markov Blanket (Will be used as Feature extraction)
+
+```{r Markov Blanket}
+train.x = subTrainData
+## change all the factors to numeric
+for(i in 1:ncol(train.x)){train.x[,i] = as.numeric(train.x[,i])}
+
+MarkovBlanket = learn.mb(train.x, node = "Happy", method = "gs")
+
+```
+
+## Run the Naive-Bayes Algorithm
+```{r Naive-Bayes}
+train.x = subTrainData
+## using naiveBayes() function from e1071 package
+Naive.Bayes.1 = naiveBayes(Happy~., data = train.x)
+```
+
+## Prepare to predict on the subTestData for Out-of-Sample accuracy measure
+
+```{r Naive-Bayes Prediction}
+
+## Prediction on SubTestData
+
+test.x = subTestData
+
+pred.Naive.Bayes.1 = predict(Naive.Bayes.1, newdata = test.x, type = "raw")
+
+```
+
+## Measure Accuracy
+
+```{r Naive-Bayes Accuracy}
+confMat.Naive.Bayes.1 = table(subTestData$Happy, pred.Naive.Bayes.1[,2] > 0.5)
+
+sum(diag(confMat.Naive.Bayes.1))/nrow(subTestData)
+```
+
+## AUC 
+
+```{r AUC Naive.Bayes}
+ROCRpred = prediction(pred.Naive.Bayes.1[,2], subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+
+##-----------------------------------------##
+
+Linear Discriminent Analysis (LDA)
+----------------------------------
+
+## Run lda() from MASS package
+```{r LDA}
+train.x = subTrainData
+AllVars.LDA.1 = lda(Happy~., data = train.x)
+
+```
+
+## Predict
+```{r LDA prediction}
+test.x = subTestData
+pred.AllVars.LDA.1 = predict(AllVars.LDA.1, newdata = test.x)
+```
+
+## Accuracy
+
+```{r LDA accuracy}
+LDA.class = pred.AllVars.LDA.1$class
+
+confMat.LDA.1 = table(subTestData$Happy, LDA.class)
+sum(diag(confMat.LDA.1))/nrow(subTestData)
+```
+
+## probabilities
+```{r}
+LDA.prob = pred.AllVars.LDA.1$posterior
+
+```
+
+## AUC
+
+```{r LDA AUC}
+ROCRprd = prediction(LDA.prob[,2], subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+
+Quadratic Discriminent Analysis (QDA, MASS package)
+---------------------------------------------------
+## run QDA from MASS package
+```{r QDA}
+train.x = subTrainData
+AllVars.QDA.1 = qda(Happy~., data = train.x)
+```
+
+## Predict
+```{r QDA prediction}
+test.x = subTestData
+pred.AllVars.QDA.1 = predict(AllVars.QDA.1, newdata = test.x)
+```
+
+## Accuracy
+
+```{r QDA accuracy}
+QDA.class = pred.AllVars.QDA.1$class
+
+confMat.QDA.1 = table(subTestData$Happy, QDA.class)
+sum(diag(confMat.QDA.1))/nrow(subTestData)
+```
+
+```{r QDA prob}
+QDA.prob = pred.AllVars.QDA.1$posterior
+
+```
+
+
+## AUC
+
+```{r QDA AUC}
+ROCRpred = prediction(QDA.prob[,2], subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+
+```
+
+K-Nearest Neighbor Classfication (KNN) using package class
+----------------------------------------------------------
+
+```{r}
+
+```
+
+## Data Preperation
+
+1. Needs a training set without the response variable
+2. Needs a testing set without the response variable
+3. Needs a vector of responses or class labels
+4. value of K
+
+
+```{r DATA Preperation}
+train.x = subTrainData
+test.x = subTestData
+
+train.x$Happy = NULL
+test.x$Happy = NULL
+
+for(i in 1:ncol(train.x)){train.x[,i] = as.numeric(train.x[,i])}
+for(i in 1:ncol(test.x)){test.x[,i] = as.numeric(test.x[,i])}
+
+train.y = subTrainData$Happy
+
+```
+
+## Run KNN() from package class
+
+
+```{r KNN}
+set.seed(1) ## needed 'cause it breaks tie using random number
+
+pred.KNN.1 = knn(train.x, test.x, cl = as.factor(train.y), k = 1, prob = TRUE)
+pred.KNN.3 = knn(train.x, test.x, cl = as.factor(train.y), k = 3, prob = TRUE)
+pred.KNN.5 = knn(train.x, test.x, cl = as.factor(train.y), k = 5, prob = TRUE)
+pred.KNN.7 = knn(train.x, test.x, cl = as.factor(train.y), k = 7, prob = TRUE)
+pred.KNN.10 = knn(train.x, test.x, cl = as.factor(train.y), k = 10, prob = TRUE)
+pred.KNN.15 = knn(train.x, test.x, cl = as.factor(train.y), k = 15, prob = TRUE)
+pred.KNN.20 = knn(train.x, test.x, cl = as.factor(train.y), k = 20, prob = TRUE)
+```
+
+## Accuracy 
+
+```{r Accuracy KNN}
+pred.KNN = list(pred.KNN.1, pred.KNN.3, pred.KNN.5, pred.KNN.7, pred.KNN.10, pred.KNN.15, pred.KNN.20)
+Accuracy = c()
+
+for(i in 1:7){
+  a =table(subTestData$Happy, pred.KNN[[i]])
+  Accuracy[i] = sum(diag(a))/sum(a)
+}
+
+plot(1:7, Accuracy, type = "l")
+```
+
+The above plot shows that pred.KNN.7 gives the best accuracy, so we choose k = 7
+We now get the probabilities
+
+```{r KNN prob}
+KNN.prob = attr(pred.KNN.7, "prob")
+
+```
+
+## AUC 
+
+```{r KNN AUC}
+ROCRpred = prediction(KNN.prob, subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+
+Above we get a very poor AUC (= 0.5775188).
+
+Support Vector Machines for Classification(using e1071 package)
+---------------------------------------------------------------
+```{r SVM Data Preperation}
+
+train.x = subTrainData
+train.x$Happy = as.factor(train.x$Happy)
+test.x = subTestData
+test.x$Happy = as.factor(test.x$Happy)
+```
+
+## Run svm()
+
+```{r SVM:GAUSSIAN(radial)}
+
+AllVars.SVM.1 = svm(Happy~., data = train.x, k = 10, kernel = "radial", probability = TRUE)
+```
+
+## Prediction
+
+```{r SVM:GAUSSIAN Prediction}
+pred.AllVars.SVM.1 = predict(AllVars.SVM.1, newdata = test.x, probability = TRUE)
+
+SVM.prob = attr(pred.AllVars.SVM.1, "prob")
+```
+
+## Accuracy
+
+```{r Accuracy SVM:GAUSSIAN}
+confMat.SVM.1 = table(subTestData$Happy, SVM.prob[,1] > 0.5)
+
+Accuracy = sum(diag(confMat.SVM.1))/sum(confMat.SVM.1)
+print(Accuracy)
+```
+
+## AUC
+
+```{r SVM:GAUSSIAN AUC}
+ROCRpred = prediction(SVM.prob[,1], subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+
+```
+
+
+##-----------------------------------------##
+
+## Run linear SVM
+
+## Run svm()
+
+```{r SVM:LINEAR}
+
+AllVars.L.SVM.1 = svm(Happy~., data = train.x, k = 10, kernel = "linear", probability = TRUE)
+```
+
+## Prediction
+
+```{r SVM:LINEAR Prediction}
+pred.AllVars.L.SVM.1 = predict(AllVars.L.SVM.1, newdata = test.x, probability = TRUE)
+
+L.SVM.prob = attr(pred.AllVars.L.SVM.1, "prob")
+```
+
+## Accuracy
+
+```{r Accuracy SVM:LINEAR}
+confMat.L.SVM.1 = table(subTestData$Happy, L.SVM.prob[,1] > 0.5)
+
+Accuracy = sum(diag(confMat.L.SVM.1))/sum(confMat.L.SVM.1)
+print(Accuracy)
+```
+
+## AUC
+
+```{r SVM:LINEAR AUC}
+ROCRpred = prediction(L.SVM.prob[,1], subTestData$Happy)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+
+```
+
+##-----------------------------------------##
+Tune via cross-validation using tune() function of e1071 package
+
+```{r TUNE L.SVM}
+set.seed(1)
+tune.L.SVM.1 = tune(svm, Happy~., data = train.x, kernel = "linear", probability = TRUE, ranges = list(cost = c(0.1,1,10)), gamma = c(0.005, 0.05,1))
+```
+
+```{r BEST L.SVM. Prediction}
+Best.L.SVM = tune.L.SVM.1$best.model
+
+pred.Best.L.SVM.subTestData = predict(Best.L.SVM, newdata = test.x, probability = TRUE)
+
+```
+
+```{r Best L.SVM:Accuracy & AUC}
+
+Accuracy(subTestData$Happy, pred.Best.L.SVM.subTestData > 0.5)
+
+AUCval(pred.Best.L.SVM.subTestData, subTestData$Happy)
+
+```
+
+
+
+
+##------------------------------------------##
+
+Run GBM (from the gbm package)
+-------------------------------
+
+## Run gbm using cross-validation
+```{r GBM:ntrees:100}
+train.x = subTrainData
+## n.trees = 100
+AllVars.GBM.1 = gbm(Happy~., data = train.x, cv.fold = 5)
+
+```
+## The result is not good. However, changing n.trees to 3000, 6000, 10000, steadily increased the AUC value to .79 while increasing the prediction accuracy at the 0.5 threshold value with distribution "adaboost"
+
+```{r GBM:HIGH n.trees:ADABOOST}
+AllVars.GBM.1.ntrees.3000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 3000)
+AllVars.GBM.1.ntrees.6000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 6000)
+AllVars.GBM.1.ntrees.10000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 10000)
+AllVars.GBM.1.ntrees.15000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 15000)
+```
+
+## Prediction
+
+```{r GBM:ADABOOST: Prediction}
+## n.trees = 100
+pred.AllVars.GBM.1 = predict(AllVars.GBM.1, newdata = subTestData, type = "response")
+## n.trees higher values
+pred.AllVars.GBM.1.ntrees.3000 = predict(AllVars.GBM.1.ntrees.3000, newdata = subTestData, type = "response")
+pred.AllVars.GBM.1.ntrees.6000 = predict(AllVars.GBM.1.ntrees.6000, newdata = subTestData, type = "response")
+pred.AllVars.GBM.1.ntrees.10000 = predict(AllVars.GBM.1.ntrees.10000, newdata = subTestData, type = "response")
+pred.AllVars.GBM.1.ntrees.15000 = predict(AllVars.GBM.1.ntrees.15000, newdata = subTestData, type = "response")
+```
+
+## Accuracy and AUC
+```{r GBM:ADABOOST:Accuracy & AUC}
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1 > 0.55)
+
+AUCval(pred.AllVars.GBM.1, subTestData$Happy)
+
+ROCplot(pred.AllVars.GBM.1, subTestData$Happy, colorize = TRUE)
+
+```
+
+## High n.trees value produces high AUC
+
+```{r GBM:ADABOOST:High n.trees: Accuracy & AUC}
+
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1.ntrees.3000 > 0.5)
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1.ntrees.6000 > 0.5)
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1.ntrees.10000 > 0.5)
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1.ntrees.15000 > 0.5)
+
+AUCval(pred.AllVars.GBM.1.ntrees.3000, subTestData$Happy)
+AUCval(pred.AllVars.GBM.1.ntrees.6000, subTestData$Happy)
+AUCval(pred.AllVars.GBM.1.ntrees.10000, subTestData$Happy)
+AUCval(pred.AllVars.GBM.1.ntrees.15000, subTestData$Happy)
+
+```
+
+It seems that n.trees = 15000 is achieving the most accurate result, wit accuracy .7287 and AUC = .7944
+
+Let me experiment with different shrinkage below.
+
+```{r GBM:ADABOOST:shrinkage:.005:n.trees:15000}
+AllVars.GBM.1.ntrees.15000.shrinkage.00.5 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 15000,shrinkage = 0.005)
+
+pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5 = predict(AllVars.GBM.1.ntrees.15000.shrinkage.00.5, newdata = subTestData, type = "response")
+
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5 > 0.5)
+AUCval(pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5, subTestData$Happy)
+```
+
+The above produced the best score so far. Let's change the shrinkage to 0.01 and redo the above experiment.
+
+```{r GBM:ADABOOST:shrinkage:.01:n.trees:15000}
+AllVars.GBM.1.ntrees.15000.shrinkage.0.01 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 15000,shrinkage = 0.01)
+
+pred.AllVars.GBM.1.ntrees.15000.shrinkage.0.01 = predict(AllVars.GBM.1.ntrees.15000.shrinkage.0.01, newdata = subTestData, type = "response")
+
+Accuracy(subTestData$Happy, pred.AllVars.GBM.1.ntrees.15000.shrinkage.0.01 > 0.5)
+AUCval(pred.AllVars.GBM.1.ntrees.15000.shrinkage.0.01, subTestData$Happy)
+```
+
+The above experiment doesn't beat the previous model, has slightly lower Accuracy and AUC values. 
+
+
+
+
+ADA (Stochastic Boosting)
+-------------------------
+
+```{r ADA}
+train.x = subTrainData
+
+test.x = subTestData[!colnames(subTestData) %in% "Happy"]
+test.y = subTestData$Happy
+
+AllVars.ADA.1 = ada(Happy~., data = train.x, test.x = test.x, test.y = test.y, iter =1000, type = "gentle", nu = 0.1, control = rpart.control(cp = -1, maxdepth = 2))
+```
+
+It seems that iter = 400 would be sufficient.
+
+```{r ADA RUN:iter = 400}
+AllVars.ADA.1.iter.400 = ada(Happy~., data = train.x, test.x = test.x, test.y = test.y, iter =400, type = "gentle", nu = 0.1, control = rpart.control(cp = -1, maxdepth = 1))
+
+
+```
+
+
+## Predict
+
+```{r ADA Predict}
+
+pred.AllVars.ADA.1 = predict(AllVars.ADA.1, newdata = test.x, type = "prob")
+
+pred.AllVars.ADA.1.iter.400 = predict(AllVars.ADA.1.iter.400, newdata = test.x, type = "prob")
+
+```
+
+## Accuracy and AUC values
+
+```{r ADA Accuracy & AUC}
+Accuracy(subTestData$Happy, pred.AllVars.ADA.1.iter.400[,2] > 0.5)
+
+AUCval(pred.AllVars.ADA.1.iter.400[,2], subTestData$Happy)
+
+```
+
+Tune random forest, rpart and gbm (possibly ADA with Markov Blanket)
+--------------------------------------------------------------------
+
+```{r TUNE using train()}
+noHappy = !colnames(subTrainData) %in% "Happy"
+
+train.x = subTrainData[noHappy]
+train.y = subTrainData$Happy
+
+fitControl = trainControl(method = "cv", number = 10) 
+
+
+
+## Tune rpart
+
+rpartGrid = expand.grid(.maxdepth = 1:10, .cp = (1:10)*0.01)
+rpartFit = train( train.x, as.factor(train.y), "rpart", tuneGrid = rpartGrid, trControl = fitControl)
+
+##---------- rpart is done -----------------##
+
+# tune rf
+#
+rfGrid = expand.grid(.mtry = 1:10 )
+rfFit = train( train.x, as.factor(train.y), "rf", tuneGrid = rfGrid, trControl = fitControl )
+
+
+## --------- rf is done --------------------###
+
+## tune ada
+
+adaGrid = expand.grid(.maxdepth = 1, .iter = c(100,200,300,400), .nu = 1 )
+adaFit = train( train.x, as.factor(train.y), "ada", tuneGrid = adaGrid, trControl = fitControl, type="discrete", loss="exponential")
+
+## In the above, Accuracy was used to select the optimal model using  the largest value.
+##The final values used for the model were iter = 100, maxdepth = 1 and nu = 1
+
+adaGrid = expand.grid(.maxdepth = 1, .iter = c(100), .nu = seq(1:10)*0.1)
+adaFit.1 = train( train.x, as.factor(train.y), "ada", tuneGrid = adaGrid, trControl = fitControl, type="discrete", loss="exponential")
+
+
+# tune gbm
+#
+gbmGrid = expand.grid(.interaction.depth = 1:10, .n.trees = c(25,50,100,200), .shrinkage = c(.01,.05,.1,.2) )
+gbmFit = train( train.x, train.y, "gbm", tuneGrid = gbmGrid, trControl = fitControl,
+  	distribution = "bernoulli")
+
+
+```
+
+
+## Final models
+```{r Final tuned model}
+## RF
+rf.out =randomForest(factor(Happy) ~., data = subTrainData, mtry = 6, importance = TRUE)
+
+rf.out.ntree.1000 =randomForest(factor(Happy) ~., data = subTrainData, mtry = 6, importance = TRUE, ntree = 1000)
+
+rf.out.ntree.1500 =randomForest(factor(Happy) ~., data = subTrainData, mtry = 6, importance = TRUE, ntree = 1500)
+
+rf.out.ntree.2000 =randomForest(factor(Happy) ~., data = subTrainData, mtry = 6, importance = TRUE, ntree = 2000)
+
+## ADA 
+
+ada.out = ada(factor(Happy)~., data = subTrainData, iter = 100, nu = 1, loss = "exponential", bag.frac = 1.0, rpart.control(maxdepth = 1))
+
+```
+
+```{r PREDICTION}
+
+## RF
+
+pred.rf.out = predict(rf.out, newdata = subTestData, type = "prob")
+Accuracy(subTestData$Happy, pred.rf.out[,2] > 0.5)
+AUCval(pred.rf.out[,2], subTestData$Happy)
+
+
+pred.rf.out.ntree.1000 = predict(rf.out.ntree.1000, newdata = subTestData, type = "prob")
+Accuracy(subTestData$Happy, pred.rf.out.ntree.1000[,2] > 0.5)
+AUCval(pred.rf.out.ntree.1000[,2], subTestData$Happy)
+
+pred.rf.out.ntree.1500 = predict(rf.out.ntree.1500, newdata = subTestData, type = "prob")
+Accuracy(subTestData$Happy, pred.rf.out.ntree.1500[,2] > 0.5)
+AUCval(pred.rf.out.ntree.1500[,2], subTestData$Happy)
+
+pred.rf.out.ntree.2000 = predict(rf.out.ntree.2000, newdata = subTestData, type = "prob")
+Accuracy(subTestData$Happy, pred.rf.out.ntree.2000[,2] > 0.5)
+AUCval(pred.rf.out.ntree.2000[,2], subTestData$Happy)
+
+
+## ADA
+
+pred.ada.out = predict(ada.out, newdata = subTestData,type = "prob")
+Accuracy(subTestData$Happy, pred.ada.out[,2] > 0.5)
+AUCval(pred.ada.out[,2], subTestData$Happy)
+
+pred.ada.out = predict(ada.out, newdata = ImpTestData, type = "prob")
+submission_25_ADA = data.frame(UserID = test$UserID, Probability1 = pred.ada.out[,2])
+write.csv(submission_25_ADA, "submission_25_ADA.csv", row.names=FALSE)
+```
+
+Above, AUC value for the model rf.out.ntree.1500 is the highest, AUC = 0.7860213
+
+Blend different model using LASSO
+---------------------------------
+
+## Form a data frame with variables as predictions from differnt algorithms
+
+```{r ENSEMBLE: Data.frame}
+
+Ensemble.test = data.frame(AllVarLASSO = pred.AllVar.LASSO.1.test.x, AllVarSVM = pred.Best.L.SVM.subTestData, AllVarGBM = pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5, AllVarADA = pred.AllVars.ADA.1.iter.400[,2], AllVarKNN = KNN.prob, AllVarNaiveBayes = pred.Naive.Bayes.1[,2], AllVarLDA = LDA.prob[,2], AllVarsRF = pred.rf.out.ntree.2000[,2] )
+
+## here pred.....train.x is obtained by using predict function on the training set, instead of test.x as in the previous line
+
+Ensemble.train = data.frame(AllVarLASSO = pred.AllVars.LASSO.train.x, BestSVM = pred.Best.L.SVM.train.x, AllVarGBM = pred.AllVars.GBM.1.ntrees.15000.shrinkag.00.5.train.x, AllVarsADA = pred.AllVars.ADA.1.iter.400.train.x[,2], AllVarsKNN = KNN.prob.train.x, AllVarsNB = pred.Naive.Bayes.1.train.x[,2], AllVarsLDA = LDA.prob.train.x[,2], AllVarsRF = pred.rf.out.ntree.2000.train.x[,2])
+
+Ensemble.train$Happy = subTrainData$Happy
+
+```
+
+## Run Ridge-Regression on Ensemble.train (using cv.glmnet with alpha = 0)
+
+```{r ENSEMBLE:RIDGE-REGRESSION}
+Ensemble.Ridge.Model = cv.glmnet(as.matrix(Ensemble.train[!colnames(Ensemble.train)%in%"Happy"]), Ensemble.train$Happy, alpha = 0, family = "binomial")
+
+
+```
+
+```{r ENSEMBLE:RIDGE-REGRESSION:PREDICT}
+
+## NOTE: ENSEMBLE.test has no "Happy" variable
+pred.Ensemble.Ridge.Model = predict(Ensemble.Ridge.Model, newx = as.matrix(Ensemble.test), type = "response")
+
+```
+
+```{r ENSEMBLE: Accuracy & AUC}
+Accuracy(subTestData$Happy, pred.Ensemble.Ridge.Model > 0.5)
+## Accuracy = 0.7258297
+
+AUCval(pred.Ensemble.Ridge.Model, subTestData$Happy)
+
+## AUC = 0.7942011
+```
+
+coef of AllVarsNB is 0.1632943 compared to others. So we retrain the model on a limited dataset with no AllVarsNB
+
+```{r ENSEMBLE:REMOVE AllVarsNB}
+Ensemble.train.noNB = Ensemble.train
+Ensemble.test.noNB = Ensemble.test
+
+Ensemble.train.noNB$AllVarsNB = NULL
+Ensemble.test.noNB$AllVarsNB = NULL
+```
+
+```{r ENSEMBLE:RETRAIN}
+Ensemble.Ridge.Model.noNB = cv.glmnet(as.matrix(Ensemble.train.noNB[!colnames(Ensemble.train.noNB)%in%"Happy"]), Ensemble.train.noNB$Happy, alpha = 0, family = "binomial")
+
+```
+
+```{r ENSEMBLE:RIDGE-REGRESSION:RE-PREDICT}
+## As before, Ensemble.test.noNB has no "Happy" variable
+pred.Ensemble.Ridge.Model.noNB = predict(Ensemble.Ridge.Model.noNB, newx = as.matrix(Ensemble.test.noNB), type = "response")
+
+```
+
+```{r ENSEMBLE:RE-RUN:Accuracy & AUC}
+Accuracy(subTestData$Happy, pred.Ensemble.Ridge.Model.noNB > 0.5)
+## Accuracy = 0.7258297, now = 0.7265512
+
+AUCval(pred.Ensemble.Ridge.Model.noNB, subTestData$Happy)
+
+## AUC = 0.7942011, now = 0.7942561
+
+```
+
+
+## Now we will form the predictions on the ImpTestData for different models and use it to form a corresponding data on which to apply our RIDGE-REGRESSION MODEL
+
+```{r ENSEMBLE:noNB:predict:ImpTestData}
+test.x = ImpTestData
+for(i in 1:ncol(test.x)){test.x[,i] = as.numeric(test.x[,i])}
+pred.AllVar.LASSO.1.ImpTestData = predict(AllVar.LASSO.1, newx = as.matrix(test.x), s = AllVar.LASSO.1$lambda.min, type = "response")
+
+print("-----------LASSO DONE-----------")
+
+test.x = ImpTestData
+pred.Best.L.SVM.ImpTestData = predict(Best.L.SVM, newdata = test.x, probability = TRUE)
+
+print("-----------SVM DONE-----------")
+
+pred.AllVars.GBM.ImpTestData = predict(AllVars.GBM.1.ntrees.15000.shrinkage.00.5, newdata = ImpTestData, type = "response")
+
+print("-----------GB DONE-----------")
+
+pred.AllVars.ADA.1.iter.400.ImpTestData = predict(AllVars.ADA.1.iter.400, newdata = ImpTestData, type = "prob")
+
+print("-----------ADA DONE-----------")
+
+train.x = subTrainData
+test.x = ImpTestData
+
+train.x$Happy = NULL
+
+
+for(i in 1:ncol(train.x)){train.x[,i] = as.numeric(train.x[,i])}
+for(i in 1:ncol(test.x)){test.x[,i] = as.numeric(test.x[,i])}
+
+train.y = subTrainData$Happy
+
+pred.KNN.7.ImpTestData = knn(train.x, test.x, cl = as.factor(train.y), k = 7, prob = TRUE)
+
+KNN.prob.ImpTestData = attr(pred.KNN.7.ImpTestData, "prob")
+
+print("-----------KNN DONE-----------")
+
+pred.AllVars.LDA.1.ImpTestData = predict(AllVars.LDA.1, newdata = ImpTestData)
+
+print("-----------LDA DONE-----------")
+
+```
+
+We build another data frame now, which are the predictions by various models (see above) on the ImpTestData. We apply the Ensemble.RIDGE-REGRESSION model on this data to get the predictions for submission.
+
+```{r NEW ENSEMBLE}
+
+LDA.prob.ImpTestData = pred.AllVars.LDA.1.ImpTestData$posterior
+
+NewEnsembleTest = data.frame(pred.AllVar.LASSO.1.ImpTestData, pred.Best.L.SVM.ImpTestData, pred.AllVars.GBM.ImpTestData, pred.AllVars.ADA.1.iter.400.ImpTestData[,2], KNN.prob.ImpTestData,LDA.prob.ImpTestData[,2], pred.rf.out.ntree.2000.ImpTestData[,2])
+
+colnames(NewEnsembleTest) = !colnames(Ensemble.test) %in% "Happy"
+```
+
+## Use the model on this data
+
+```{r RUN ENSEMBLE.Regression}
+
+pred.NewEnsembleTest = predict(Ensemble.Ridge.Model.noNB, newx = as.matrix(NewEnsembleTest), type = "response")
+```
+
+## Submission
+
+```{r ENSEMBLE:SUBMISSION}
+submission_23_ENSEMBLE = data.frame(UserID = test$UserID, Probability1 = pred.NewEnsembleTest)
+
+write.csv(submission_23_ENSEMBLE, "submission_23_ENSEMBLE.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+##--------------------------------------------------------##
+
+Experiment (with Limited Features via Markov Blanket)
+------------------------------------------------------
+We now run the above models, using only the variables in the Markov Blanket 
+
+## Run GLM
+
+```{r LOGIT:MarkovBlanket}
+x = subTrainData[union("Happy", MarkovBlanket)]
+test.x = subTestData[union("Happy", MarkovBlanket)]
+
+MB.Logit.2 = glm(Happy~., data = x, family = "binomial")
+
+```
+
+## Prediction
+
+```{r LOGIT:MarkovBlanket PREDICTION}
+pred.MB.LOGIT.2 = predict(MB.Logit.2, newdata = test.x, type = "response")
+
+```
+
+## Measuer Accuracy, Calculuate AUC value
+
+```{r LOGIT:MarkovBlanket Accuracy&AUC}
+
+Accuracy(subTestData$Happy, pred.MB.LOGIT.2 > 0.5)
+
+AUCval(pred.MB.LOGIT.2, subTestData$Happy)
+
+ROCplot(pred.MB.LOGIT.2, subTestData$Happy, colorize = TRUE)
+```
+
+
+LASSO
+------
+
+```{r LASSO: Markov Blanket: Data Prep}
+train.x = subTrainData[union("Happy", MarkovBlanket)]
+train.x$Happy = NULL
+
+for(i in 1:ncol(train.x)){train.x[,i] = as.numeric(train.x[,i])}
+
+y = subTrainData$Happy
+
+test.x = subTestData[union("Happy", MarkovBlanket)]
+test.x$Happy = NULL
+for(i in 1:ncol(train.x)){test.x[,i] = as.numeric(test.x[,i])}
+
+
+```
+
+## Run LASSO
+
+```{r LASSO:Markov Blanket RUN}
+MB.LASSO.2 = cv.glmnet(as.matrix(train.x), y, family = "binomial", type.measure = "class")
+
+```
+
+```{r}
+NonZeroVars.MB.LASSO.2 = colnames(train.x)[which(coef(MB.LASSO.2)!=0)]
+```
+
+## Predict 
+
+```{r LASSO:Markov Blanket: Predict}
+pred.MB.LASSO.2.test.x = predict(MB.LASSO.2, newx = as.matrix(test.x), s = "lambda.min", type = "response")
+
+```
+
+## Accuracy and AUC
+
+```{r}
+Accuracy(subTestData$Happy, pred.MB.LASSO.2.test.x > 0.5)
+
+AUCval(pred.MB.LASSO.2.test.x, subTestData$Happy)
+```
+
+
+
+
+Naive-Bayes Algorithm
+---------------------
+
+## Run the Naive-Bayes Algorithm
+```{r Naive-Bayes:Markov Blanket}
+train.x = subTrainData[union("Happy", MarkovBlanket)]
+## using naiveBayes() function from e1071 package
+MB.Naive.Bayes.2 = naiveBayes(Happy~., data = train.x)
+```
+
+## Prepare to predict on the subTestData for Out-of-Sample accuracy measure
+
+```{r Naive-Bayes:Markov Blanket Prediction}
+
+## Prediction on SubTestData
+
+test.x = subTestData[union("Happy", MarkovBlanket)]
+
+pred.MB.Naive.Bayes.2 = predict(MB.Naive.Bayes.2, newdata = test.x, type = "raw")
+
+```
+
+## Measuer Accuracy, Calculuate AUC value
+
+```{r Naive-Bayes:MarkovBlanket Accuracy&AUC}
+
+Accuracy(subTestData$Happy, pred.MB.Naive.Bayes.2[,2] > 0.5)
+
+AUCval(pred.MB.Naive.Bayes.2[,2], subTestData$Happy)
+
+ROCplot(pred.MB.Naive.Bayes.2[,2], subTestData$Happy, colorize = TRUE)
+```
+
+GBM (Gradient Boosting Machine)
+-------------------------------
+
+## Run gbm(Package:gbm)
+
+```{r GBM:Markov Blanket Run}
+train.x = subTrainData[union("Happy",MarkovBlanket)]
+
+MB.GBM.2.ntrees.3000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 3000)
+MB.GBM.2.ntrees.6000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 6000)
+MB.GBM.2.ntrees.10000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 10000)
+MB.GBM.2.ntrees.15000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 15000)
+
+```
+
+## Prediction
+
+```{r GBM:Markov Blanket Prediction}
+pred.MB.GBM.2.ntrees.3000 = predict(MB.GBM.2.ntrees.3000, newdata = subTestData, type = "response")
+pred.MB.GBM.2.ntrees.6000 = predict(MB.GBM.2.ntrees.6000, newdata = subTestData, type = "response")
+pred.MB.GBM.2.ntrees.10000 = predict(MB.GBM.2.ntrees.10000, newdata = subTestData, type = "response")
+pred.MB.GBM.2.ntrees.15000 = predict(MB.GBM.2.ntrees.15000, newdata = subTestData, type = "response")
+
+
+```
+
+## Accuracy and AUC
+
+```{r GBM:Markov Blanket: Accuracy & AUC}
+
+Accuracy(subTestData$Happy, pred.MB.GBM.2.ntrees.3000 > 0.5)
+Accuracy(subTestData$Happy, pred.MB.GBM.2.ntrees.6000 > 0.5)
+Accuracy(subTestData$Happy, pred.MB.GBM.2.ntrees.10000 > 0.5)
+Accuracy(subTestData$Happy, pred.MB.GBM.2.ntrees.15000 > 0.5)
+
+AUCval(pred.MB.GBM.2.ntrees.3000, subTestData$Happy)
+AUCval(pred.MB.GBM.2.ntrees.6000, subTestData$Happy)
+AUCval(pred.MB.GBM.2.ntrees.10000, subTestData$Happy)
+AUCval(pred.MB.GBM.2.ntrees.15000, subTestData$Happy)
+
+```
+
+```{r GBM:MB:ADABOOST:shrinkage:.005:n.trees:15000}
+MB.GBM.2.ntrees.15000.shrinkage.00.5 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 15000,shrinkage = 0.005)
+
+pred.MB.GBM.2.ntrees.15000.shrinkage.00.5 = predict(MB.GBM.2.ntrees.15000.shrinkage.00.5, newdata = subTestData, type = "response")
+
+Accuracy(subTestData$Happy, pred.MB.GBM.2.ntrees.15000.shrinkage.00.5 > 0.5)
+AUCval(pred.MB.GBM.2.ntrees.15000.shrinkage.00.5, subTestData$Happy)
+```
+
+## Run GBM on the complement of Markov Blanket and then combine the markov blanket and non-markov blanket model
+
+```{r GBM:complementMB}
+
+train.x = subTrainData[!colnames(subTrainData) %in% MarkovBlanket]
+
+cMB.GBM.3.ntrees.3000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 3000)
+cMB.GBM.3.ntrees.6000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 6000)
+cMB.GBM.3.ntrees.10000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 10000)
+cMB.GBM.3.ntrees.15000 = gbm(Happy~., data = train.x, cv.fold = 5, distribution = "adaboost", n.trees = 15000)
+
+
+```
+
+## Prediction
+
+```{r GBM:cMB: Prediction}
+pred.cMB.GBM.3.ntrees.3000 = predict(cMB.GBM.3.ntrees.3000, newdata = subTestData, type = "response")
+pred.cMB.GBM.3.ntrees.6000 = predict(cMB.GBM.3.ntrees.6000, newdata = subTestData, type = "response")
+pred.cMB.GBM.3.ntrees.10000 = predict(cMB.GBM.3.ntrees.10000, newdata = subTestData, type = "response")
+pred.cMB.GBM.3.ntrees.15000 = predict(cMB.GBM.3.ntrees.15000, newdata = subTestData, type = "response")
+
+
+```
+
+
+## Accuracy and AUC
+
+```{r GBM:Markov Blanket: Accuracy & AUC}
+
+Accuracy(subTestData$Happy, pred.cMB.GBM.3.ntrees.3000 > 0.5)
+Accuracy(subTestData$Happy, pred.cMB.GBM.3.ntrees.6000 > 0.5)
+Accuracy(subTestData$Happy, pred.cMB.GBM.3.ntrees.10000 > 0.5)
+Accuracy(subTestData$Happy, pred.cMB.GBM.3.ntrees.15000 > 0.5)
+
+AUCval(pred.cMB.GBM.3.ntrees.3000, subTestData$Happy)
+AUCval(pred.cMB.GBM.3.ntrees.6000, subTestData$Happy)
+AUCval(pred.cMB.GBM.3.ntrees.10000, subTestData$Happy)
+AUCval(pred.cMB.GBM.3.ntrees.15000, subTestData$Happy)
+
+```
+
+## Mix the two models (cMB and MB)
+
+```{r}
+alpha = seq(from=0, to = 1, by = 0.01)
+
+auc.cMB.MB.3000 = c()
+acry.cMB.MB.3000 = c()
+
+auc.cMB.MB.6000 = c()
+acry.cMB.MB.6000 = c()
+
+auc.cMB.MB.10000 = c()
+acry.cMB.MB.10000 = c()
+
+auc.cMB.MB.15000 = c()
+acry.cMB.MB.15000 = c()
+
+for(i in 1:100){
+ testPred.cMB.MB = alpha[i]*pred.cMB.GBM.3.ntrees.3000 + (1-alpha[i])*pred.MB.GBM.2.ntrees.3000
+ acry.cMB.MB.3000[i] = Accuracy(subTestData$Happy, testPred.cMB.MB > 0.5)
+ auc.cMB.MB.3000[i] = AUCval(testPred.cMB.MB, subTestData$Happy)
+
+ testPred.cMB.MB = alpha[i]*pred.cMB.GBM.3.ntrees.6000 + (1-alpha[i])*pred.MB.GBM.2.ntrees.6000
+ acry.cMB.MB.6000[i] = Accuracy(subTestData$Happy, testPred.cMB.MB > 0.5)
+ auc.cMB.MB.6000[i] = AUCval(testPred.cMB.MB, subTestData$Happy)
+ 
+ testPred.cMB.MB.10000 = alpha[i]*pred.cMB.GBM.3.ntrees.10000 + (1-alpha[i])*pred.MB.GBM.2.ntrees.10000
+ acry.cMB.MB.10000[i] = Accuracy(subTestData$Happy, testPred.cMB.MB.10000 > 0.5)
+ auc.cMB.MB.10000[i] = AUCval(testPred.cMB.MB.10000, subTestData$Happy)
+ 
+ testPred.cMB.MB = alpha[i]*pred.cMB.GBM.3.ntrees.15000 + (1-alpha[i])*pred.MB.GBM.2.ntrees.15000
+ acry.cMB.MB.15000[i] = Accuracy(subTestData$Happy, testPred.cMB.MB > 0.5)
+ auc.cMB.MB.15000[i] = AUCval(testPred.cMB.MB, subTestData$Happy)
+ 
+}
+
+
+par(mfrow=c(2,1))
+plot(acry.cMB.MB.3000, type = "l")
+abline(h = max( Accuracy(subTestData$Happy, pred.cMB.GBM.3.ntrees.3000 > 0.5),  Accuracy(subTestData$Happy, pred.MB.GBM.2.ntrees.3000 > 0.5)), col = "red")
+lines(acry.cMB.MB.6000,type = "l")
+lines(acry.cMB.MB.10000,type = "l")
+lines(acry.cMB.MB.15000,type = "l")
+
+plot(auc.cMB.MB.3000, type = "l", col = "green")
+abline(h = max(AUCval(pred.cMB.GBM.3.ntrees.15000, subTestData$Happy), AUCval(pred.MB.GBM.2.ntrees.15000, subTestData$Happy)), col = "green")
+lines(auc.cMB.MB.6000, type = "l", col = "red")
+lines(auc.cMB.MB.10000, type = "l", col = "blue")
+lines(auc.cMB.MB.15000, type = "l", col = "black")
+
+```
+
+```{r}
+alpha = seq(from=0, to = 1, by = 0.01)
+auc = c()
+acry = c()
+
+testPred.cMB.MB.10000 = alpha[24]*pred.cMB.GBM.3.ntrees.10000 + (1-alpha[24])*pred.MB.GBM.2.ntrees.10000
+ 
+
+for(i in 1:100){
+final.model =  alpha[i]*pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5 + (1 - alpha[i])*testPred.cMB.MB.10000
+
+acry[i] = Accuracy(subTestData$Happy, final.model > 0.5)
+ auc[i] = AUCval(final.model, subTestData$Happy)
+}
+
+```
+
+```{r}
+plot(auc,type = "l")
+abline(h = auc.cMB.MB.10000[24], col = "red")
+abline(h = AUCval(pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5, subTestData$Happy), col = "blue")
+```
+
+```{r Final Model}
+pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5.ImpTestData = predict(AllVars.GBM.1.ntrees.15000.shrinkage.00.5, newdata = ImpTestData, type = "response")
+
+pred.cMB.GBM.3.ntrees.10000.ImpTestData = predict(cMB.GBM.3.ntrees.10000, newdata = ImpTestData, type = "response")
+
+pred.MB.GBM.2.ntrees.10000.ImpTestData = predict(MB.GBM.2.ntrees.10000, newdata = ImpTestData, type = "response")
+
+## now mix the predictions according to the above rules
+## step 1
+testPred.cMB.MB.10000.ImpTestData = alpha[24]*pred.cMB.GBM.3.ntrees.10000.ImpTestData + (1-alpha[24])*pred.MB.GBM.2.ntrees.10000.ImpTestData
+
+## step 2
+which.max(auc) ## = 73
+
+final.model.ImpTestData =  alpha[which.max(auc)]*pred.AllVars.GBM.1.ntrees.15000.shrinkage.00.5.ImpTestData + (1 - alpha[which.max(auc)])*testPred.cMB.MB.10000.ImpTestData
+
+
+## prepare submission
+
+submission_26_FinalModel = data.frame(UserID = test$UserID, Probability1 = final.model.ImpTestData)
+
+write.csv(submission_26_FinalModel, "submission_26_FinalModel.csv", row.names = FALSE)
+
+submission_27_FinalModel = data.frame(UserID = test$UserID, Probability1 = testPred.cMB.MB.10000.ImpTestData)
+
+write.csv(submission_27_FinalModel, "submission_27_FinalModel.csv", row.names = FALSE)
+
+```
+
+
+
+## ADA on limited data
+
+
