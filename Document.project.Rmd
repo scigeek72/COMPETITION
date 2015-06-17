@@ -1,0 +1,330 @@
+CrowdAnalytix Project- Occupancy Rates of Rental Properties in US
+========================================================
+
+PLAN
+=====
+
+First, we shall try to fill up the data for the month of Nov and Dec for each of the Rental Properties (714 in total). 
+
+Next We shall try to build a model using the relevant variables. 
+
+How Do we Do it ?
+==================
+Each property is associated with 10 rows of data (Jan - Oct, 2013), and the next two rows we need to fill up.  Lets concentrate on the first property. We will fill up the last two rows of a particular column with mean of that column. 
+```{r}
+OCrate.Train <- read.csv("CA_Occupancy_Rate_Train.csv")
+n.row = nrow(OCrate.Train)
+```
+Generate a sequence of integers from 1 to n.col, seperated by 12. Each value in that sequence represents a differnet property, and it's starting row index in the data.frame.
+
+```{r}
+index = seq(from = 1, to = n.row, by = 12)
+
+```
+Before we we begin, we will replace the "-" by "NA"s. Our working dataset will be named "myData". It is temporary dataset and keep 'OCrate.Train' secured, without making any changes.
+
+```{r}
+myData = OCrate.Train
+
+for(i in 5:168){
+  temp = gsub("-", "NA", OCrate.Train[,i])
+  temp = as.numeric(as.character(temp))
+  myData[,i] = temp
+}
+
+```
+
+We will use the following codes to fill up the missing variables. 
+Also note that, we have created two separate data frames, Nov and Dec.
+I will try to build a model for each of these data sets.
+
+```{r}
+set.seed(101)
+
+Nov <- data.frame()
+Dec <- data.frame()
+count = 1
+
+for (i in index){
+  k = i+11
+  pid = myData[i:k, ]
+  for(j in 5:ncol(pid)){
+    if(class(pid[,j])=="factor"){
+      if(max(as.numeric(pid[1:10,j])) == min(as.numeric(pid[1:10,j]))){
+        pid[11,j] = pid[10,j]
+        pid[12,j] = pid[10,j]
+      }
+    }
+    if(class(pid[,j])=="integer"){
+      if(max(pid[1:10,j],na.rm =TRUE) == min(pid[1:10,j],na.rm =TRUE)){
+        pid[11,j] = pid[10,j]
+        pid[12,j] = pid[10,j]
+      }
+      else{
+        pid[11,j] = pid[10,j] + floor(mean(abs(diff(pid[1:10,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+        pid[12,j] = pid[11,j] + floor(mean(abs(diff(pid[1:11,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+      }
+    }
+    if(class(pid[,j])=="numeric"){
+      if(max(pid[1:10,j], na.rm =TRUE) == min(pid[1:10,j],na.rm = TRUE)){
+        pid[11,j] = pid[10,j]
+        pid[12,j] = pid[10,j]
+      }
+      else{
+        pid[11,j] = pid[10,j] + floor(mean(abs(diff(pid[1:10,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+        pid[12,j] = pid[11,j] + floor(mean(abs(diff(pid[1:11,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+      }
+    }
+  }
+  if(count == 1){
+    Nov <- pid[11,]
+    Dec <- pid[12,]
+  }
+  else{
+    Nov[count,] = pid[11,]
+    Dec[count,] = pid[12,]
+  }
+  count = count + 1
+}
+
+
+```
+
+In the above code, while filling up the rows for the month of November and December, I have used a slightly different method. Since the time series doesn't have too many data in it, I first looked at the average of the absolute differences (using diff()) function. Then added (or substracted depending on a toss of a coin) that value to the value of the month of october. By setting the seed, I made sure that the exact dataset can be reproduced each time this code is run.
+
+
+So, at the end, I have two datasets, Nov and Dec. 
+I will try to build a model on these two datasets separately. Notice that, each data sets has about 168 columns (although the first 3 are useless for model building), and
+714 rows. The response variable here is the Occupancy rate, the 4th column. 
+
+Now, that the two data frames have been built, Nov and Dec, we will remove the rows from each datasets where the response variable is missing. Once that is obtained, we will try to impute the other values in the truncated datasets.
+
+```{r}
+split = !is.na(Nov[,4])
+CurrNov = subset(Nov, split == TRUE)
+
+split = !is.na(Dec[,4])
+CurrDec = subset(Dec, split == TRUE)
+
+```
+
+We shall keep Nov, and Dec for reference just in case something goes wrong, and work with CurrNov, and CurrDec.
+
+Now, we will try to impute the datasets using the pacakge "softImpute" by Prof.Hastie.
+
+```{r}
+require(softImpute)
+```
+
+Since we require matrix, instead of a data frame, we strip off the first 3 columns of the data frame (useless for us) and then convert it to a matrix.
+
+```{r}
+simple = CurrNov[,-(1:3)]
+simple = as.matrix(simple)
+imputed = softImpute(simple)
+completed_imputed = complete(simple, imputed)
+imputed_CurrNov = completed_imputed
+
+```
+
+Similarly, we treat "CurrDec"
+
+```{r}
+simple = CurrDec[,-(1:3)]
+simple = as.matrix(simple)
+imputed = softImpute(simple)
+completed_imputed = complete(simple, imputed)
+imputed_CurrDec = completed_imputed
+
+```
+
+Remove "simple","imputed" and "completed_imputed" matrices.
+
+```{r}
+rm(simple)
+rm(imputed)
+rm(completed_imputed)
+```
+
+Model Building
+===============
+
+
+
+
+Now, we build the models. 
+First we fit a linear model, then we will try LASSO, and randomForest.
+The above methods are not encouraging. So I used boosting method from gbm package.
+
+```{r}
+require(gbm)
+
+```
+Now use the following piece of code to generate fitted models.
+
+```{r}
+boost.Nov = gbm(Occupancy_Rate.Response.Variable. ~ . -VAR_154-VAR_155-VAR_157-VAR_158-VAR_159-VAR_160-VAR_161-VAR_162-VAR_163-VAR_164, data = as.data.frame(imputed_CurrNov), distribution = "gaussian", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+
+summary(boost.Nov)
+
+
+```
+
+Similarly,
+
+```{r}
+boost.Dec = gbm(Occupancy_Rate.Response.Variable. ~ . -VAR_154-VAR_155-VAR_157-VAR_158-VAR_159-VAR_160-VAR_161-VAR_162-VAR_163-VAR_164, data = as.data.frame(imputed_CurrDec), distribution = "gaussian", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+
+summary(boost.Dec)
+
+```
+
+The summary() method lists the relative influence score for each of the variables. 
+I have selected all those variables whose relative influence score (rel.inf) is above 1. 
+
+This reduces the number of variables to approximately ~ 25 in each case. Now I could use the model to predict. I will try to predict tomorrow. But first the test data needs to be cleaned the same way train data was cleaned and shaped.
+
+Test Data
+==========
+
+Read in the data
+
+```{r}
+OCrate.Test = read.csv("CA_Occupancy_Rate_Public_Test_Set.csv")
+
+n.row = nrow(OCrate.Test)
+index = seq(from = 1, to = n.row, by = 12)
+```
+
+Now, as before, we need clean the dataset for testing the model. 
+
+```{r}
+myData = OCrate.Test
+
+for(i in 5:168){
+  temp = gsub("-", "NA", OCrate.Test[,i])
+  temp = as.numeric(as.character(temp))
+  myData[,i] = temp
+}
+
+```
+
+```{r}
+set.seed(101)
+
+NovTest <- data.frame()
+DecTest <- data.frame()
+count = 1
+
+for (i in index){
+  k = i+11
+  pid = myData[i:k, ]
+  for(j in 5:ncol(pid)){
+    if(class(pid[,j])=="factor"){
+      if(max(as.numeric(pid[1:10,j])) == min(as.numeric(pid[1:10,j]))){
+        pid[11,j] = pid[10,j]
+        pid[12,j] = pid[10,j]
+      }
+    }
+    if(class(pid[,j])=="integer"){
+      if(max(pid[1:10,j],na.rm =TRUE) == min(pid[1:10,j],na.rm =TRUE)){
+        pid[11,j] = pid[10,j]
+        pid[12,j] = pid[10,j]
+      }
+      else{
+        pid[11,j] = pid[10,j] + floor(mean(abs(diff(pid[1:10,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+        pid[12,j] = pid[11,j] + floor(mean(abs(diff(pid[1:11,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+      }
+    }
+    if(class(pid[,j])=="numeric"){
+      if(max(pid[1:10,j], na.rm =TRUE) == min(pid[1:10,j],na.rm = TRUE)){
+        pid[11,j] = pid[10,j]
+        pid[12,j] = pid[10,j]
+      }
+      else{
+        pid[11,j] = pid[10,j] + floor(mean(abs(diff(pid[1:10,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+        pid[12,j] = pid[11,j] + floor(mean(abs(diff(pid[1:11,j])), na.rm = TRUE))*(ifelse(runif(1,0,1)>0.5,1,-1))
+      }
+    }
+  }
+  if(count == 1){
+    NovTest <- pid[11,]
+    DecTest <- pid[12,]
+  }
+  else{
+    NovTest[count,] = pid[11,]
+    DecTest[count,] = pid[12,]
+  }
+  count = count + 1
+}
+
+
+```
+
+Get rid off the NA's in the response variable. So we remove the rows which has a NA in the response variable as in the Train Data.
+
+```{r}
+
+split = is.na(NovTest[,4])
+CurrNovTest = subset(NovTest, split == TRUE)
+
+split = is.na(DecTest[,4])
+CurrDecTest = subset(DecTest, split == TRUE)
+
+
+```
+
+```{r}
+require(softImpute)
+
+simple = CurrNovTest[,-(1:4)]
+simple = as.matrix(simple)
+imputed = softImpute(simple)
+completed_imputed = complete(simple, imputed)
+imputed_CurrNovTest = completed_imputed
+
+
+```
+
+
+
+```{r}
+
+simple = CurrDecTest[,-(1:4)]
+simple = as.matrix(simple)
+imputed = softImpute(simple)
+completed_imputed = complete(simple, imputed)
+imputed_CurrDecTest = completed_imputed
+
+
+```
+
+```{r}
+require(gbm)
+
+```
+
+
+Prediction
+==========
+
+
+Now that we have the data sets cleaned, we will use predict method to predict and compute mae (using the "Matrics" package)
+
+```{r}
+require(Metrics)
+```
+
+Next, we will predict and compute the MAE.
+
+```{r}
+
+pred.Nov = predict(boost.Nov, newdata = as.data.frame(imputed_CurrNovTest), n.trees = 1000)
+pred.Dec = predict(boost.Dec, newdata = as.data.frame(imputed_CurrDecTest), n.trees = 1000)
+
+#MAE.Nov = mae(response.test.Nov, pred.Nov)
+#MAE.Dec = mae(response.test.Dec, pred.Dec)
+
+
+```
+
